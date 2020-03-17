@@ -1,6 +1,14 @@
 -module(server).
 -compile(export_all).
 
+
+-record(gameState, {
+    player1="",
+    player2="",
+    watchers=[],
+    state={}
+}).
+
 server(Port) ->
     {ok, ListenSocket} = gen_tcp:listen(Port, [{active,false}, {packet,0}]),
     io:format("Listening in port ~p~n", [Port]),
@@ -53,7 +61,8 @@ usernames(UsernameList) ->
             end
     end.
 
-
+game(R) ->
+    io:format("game ~p~n", [R]).
 
 psocket(Socket, UserName) ->
     io:format("psocket, ~p~n", [Socket]),
