@@ -4,27 +4,53 @@
 test_listener(Value, Port) ->
     global:register_name("P" ++ Value, self()),
     {ok, ListenSocket} = gen_tcp:listen(Port, [{active,true}, {packet,0}]),
-    receive
-        {ok, Pid} ->
-            io:format("~p receiving ~p~n", [self(), Value]),
-            Pid!Value
-    end,
-    test_listener(Value).
+    dispatcher(Value, ListenSocket).
 
+
+dispatcher(Value, ListenSocket) ->
+    {ok, Socket} = gen_tcp:accept(ListenSocket),
+    receive
+        {tcp, Socket, Msg} ->
+            io:format("~p receiving ~p~n", [self(), Msg]),
+            gen_tcp:send(Socket, Value),
+            dispatcher(Value, ListenSocket)
+    end.
+
+-record(url, {ip='localhost', port=9000}).
+
+server_list() ->
+    [#url{}, #url{port=9001}].
+
+printer(L) ->
+    case L of
+        [Val | Rest] ->
+            io:format("~s ~p~n", [Val#url.ip, Val#url.port]),
+            printer(Rest);
+        [] ->
+            io:format("end~n")
+    end.
 
 test_sender() ->
-    L = global:registered_names(),
+    L = server_list(),
     io:format("list is ~p~n", [L]),
     test_sender_names(L, []).
 
 test_sender_names(L, Values) ->
     case L of
         [Name | LL] ->
-            Pid = global:whereis_name(Name),
-            Pid!{ok, self()},
+            Ip = Name#url.ip,
+            Port = Name#url.port,
+            io:format("connecting to ~s ~p~n", [Ip, Port]),
+            {ok, Socket} = gen_tcp:connect(Ip, Port, [{active,true}, {packet,0}]),
+            io:format("connected to ~s ~p~n", [Ip, Port]),
+            gen_tcp:send(Socket, "ok"),
             receive
-                Value -> test_sender_names(LL, Values ++ [Value])
+                {tcp, Socket, Value} ->
+                    io:format("received ~p~n", [Value]),
+                    test_sender_names(LL, Values ++ [Value]);
+                {error, Reason} -> io:format("error ~s~n",[Reason])
             end;
         [] ->
             io:format("list ended ~p~n", [Values])
     end.
+
