@@ -9,17 +9,25 @@
     state={}
 }).
 
--record(url, {ip='localhost', port=8000}).
+-record(url, {id="server0", ip='localhost', port=8000}).
 
 server(Port) ->
     {ok, ListenSocket} = gen_tcp:listen(Port, [{active,false}, {packet,0}]),
     io:format("Listening in port ~p~n", [Port]),
-    UserNamesPid = spawn(?MODULE, userNames, [[]]),
-    CoopUserNameReq = spawn(?MODULE, cooperativeUserNameReq, ['localhost', Port]),
-    global:register_name("name_list", UserNamesPid),
-    global:register_name("cooperative_user_name", CoopUserNameReq),
+    initControllers(Port),
     dispatcher(ListenSocket, Port).
 
+initControllers(Port) ->
+    UserNamesPid = spawn(?MODULE, userNames, [[]]),
+    CoopUserNameReq = spawn(?MODULE, cooperativeUserNameReq, ['localhost', Port]),
+    GameListPid = spawn(?MODULE, gameList, [[]]),
+    CoopGameListPid = spawn(?MODULE, cooperativeGameListReq, [Port]),
+    GameCounterPid = spawn(?MODULE, gameCounter, [Port]),
+    global:register_name("name_list", UserNamesPid),
+    global:register_name("cooperative_user_name", CoopUserNameReq),
+    global:register_name("game_list", GameListPid),
+    global:register_name("cooperative_game_list", CoopGameListPid),
+    global:register_name("game_counter", GameCounterPid).
 
 dispatcher(ListenSocket, Port) ->
     {ok, Socket} = gen_tcp:accept(ListenSocket),
@@ -57,15 +65,39 @@ pcommand(Command, Socket) ->
         "COOP NAME " ++ Name ->
             io:format("receive cooperative req ~s~n", [Name]),
             case attendToCoopNameReq(Name) of
-                ok -> gen_tcp:send(Socket, "OK COOP NAME");
-                error -> gen_tcp:send(Socket, "ERROR COOP NAME")
+                true -> gen_tcp:send(Socket, "EXISTS COOP NAME");
+                false -> gen_tcp:send(Socket, "DOESNT EXISTS COOP NAME")
+            end;
+        "NEW " ++ Name ->
+            io:format("~s: ~s~n", [Name, Command]),
+            GameListPid = global:whereis_name("game_list"),
+            GameListPid!{add, self()},
+            receive
+                {ok, GameId} -> gen_tcp:send(Socket, "OK NEW " ++ GameId);
+                _ -> gen_tcp:send(Socket, "ERROR NEW")
             end;
         "LSG " ++ Name ->
             io:format("LSG ~s ~n", [Name]),
-            gen_tcp:send(Socket, "OK LSG " ++ Name);
-        "NEW " ++ Name ->
-            io:format("~s: ~s~n", [Name, Command]),
-            gen_tcp:send(Socket, "OK " ++ Command);
+            GameListPid = global:whereis_name("game_list"),
+            GameListPid!{get, self()},
+            receive
+                L ->
+                    io:format("llego nomas ~p~n", [L]),
+                    LL = parseGameList(L),
+                    io:format("retorna ~s~n",[LL]),
+                    gen_tcp:send(Socket, "OK LSG " ++ LL)
+            end;
+        "COOP LSG" ->
+            io:format("COOP LSG~n"),
+            GameListPid = global:whereis_name("game_list"),
+            GameListPid!{getCoop, self()},
+            receive
+                L ->
+                    io:format("llego nomas ~p~n", [L]),
+                    LL = parseGameList(L ++ [1]),
+                    io:format("retorna ~s~n",[LL]),
+                    gen_tcp:send(Socket, "OK COOP LSG " ++LL)
+            end;
         "ACC " ++ Rest ->
             io:format("~s~n", [Command]),
             gen_tcp:send(Socket, "OK " ++ Command);
@@ -75,11 +107,13 @@ pcommand(Command, Socket) ->
     end.
 
 
+%% Process with lists of server
+
 totalServerList() ->
     [
-        #url{}
-        #url{port=8001},
-        #url{port=8002}
+        #url{},
+        #url{id = "server1", port=8001}
+%%        #url{id = 'server2', port=8002}
     ].
 
 serverList(Ip, Port) ->
@@ -89,6 +123,9 @@ serverList(Ip, Port) ->
         I = X#url.ip /= Ip,
         P or I end, L),
     LL.
+
+
+%% Process to keep list of names
 
 userNames(UsernameList) ->
     receive
@@ -100,11 +137,14 @@ userNames(UsernameList) ->
                 false ->
                     % agregar aca un chequeo a los demas servidores que esten corriendo
                     COOP = global:whereis_name("cooperative_user_name"),
-                    COOP!{newName, Name, self()},
+                    COOP!{contains, Name, self()},
                     receive
-                        ok ->
+                        false ->
                             Pid!ok,
                             userNames(UsernameList ++ [Name]);
+                        true ->
+                            Pid!error,
+                            userNames(UsernameList);
                         error ->
                             Pid!error,
                             userNames(UsernameList)
@@ -118,12 +158,13 @@ userNames(UsernameList) ->
 
 cooperativeUserNameReq(Ip, Port) ->
     receive
-        {newName, Name, Pid} ->
+        {contains, Name, Pid} ->
             Servers = serverList(Ip, Port),
             io:format("servers ~p~n",[Servers]),
             Pid!userNameReq(Servers, Name)
     end,
     cooperativeUserNameReq(Ip, Port).
+
 
 userNameReq(Servers, Name) ->
     case Servers of
@@ -133,14 +174,17 @@ userNameReq(Servers, Name) ->
             {ok, Socket} = gen_tcp:connect(Ip, Port, [{active,false}, {packet,0}]),
             gen_tcp:send(Socket, "COOP NAME " ++ Name),
             case gen_tcp:recv(Socket, 0) of
-                {ok, "OK COOP NAME"} ->
+                {ok, "DOESNT EXISTS COOP NAME"} ->
                     gen_tcp:close(Socket),
                     userNameReq(Rest, Name);
+                {ok, "EXISTS COOP NAME"} ->
+                    gen_tcp:close(Socket),
+                    true;
                 _ ->
                     gen_tcp:close(Socket),
                     error
             end;
-        [] -> ok
+        [] -> false
     end.
 
 attendToCoopNameReq(Name) ->
@@ -148,8 +192,108 @@ attendToCoopNameReq(Name) ->
     UserNamesPid!{contains, Name, self()},
     io:format("attendToCoopNameReq~n"),
     receive
-        false -> ok;
-        true -> error
+        Val -> Val
+    end.
+
+
+% Process with list of games
+
+%% keep list of games in this server
+
+gameCounter(Port) ->
+    gameCounter('localhost', Port).
+
+
+gameCounter(Ip, Port) ->
+    Servers = totalServerList(),
+    LL = lists:filter(fun(X)->
+        P = X#url.port == Port,
+        I = X#url.ip == Ip,
+        io:format("filtering ~s ~p with ~s ~p~n", [I, P, Ip, Port]),
+        P and I end, Servers),
+    S = lists:nth(1, LL),
+    Prefix = S#url.id,
+    io:format("~s~n", [Prefix]),
+    gameCounterPrefix(0, Prefix).
+
+
+gameCounterPrefix(N, Prefix) ->
+    receive
+        {add, Pid, PCommandPid} ->
+            StrN = lists:flatten(io_lib:format("~p", [N])),
+            Pid!{new, Prefix ++ ("_" ++ StrN), PCommandPid},
+            gameCounterPrefix(N + 1, Prefix)
+    end.
+
+gameList(GameList) ->
+    receive
+        {add, Pid} ->
+            io:format("gameList receive add~n"),
+            GameCounterPid = global:whereis_name("game_counter"),
+            GameCounterPid!{add, self(), Pid},
+            gameList(GameList);
+        {new, GameId, Pid} ->
+            Pid!{ok, GameId},
+            gameList(GameList ++ [GameId]);
+        {get, Pid} ->
+            CoopGameListPid = global:whereis_name("cooperative_game_list"),
+            CoopGameListPid!{get, Pid, self()};
+        {getCoop, Pid} ->
+            Pid!GameList,
+            gameList(GameList);
+        {gameList, PCommandPid, Games} ->
+            PCommandPid!Games
+    end,
+    gameList(GameList).
+
+parseGameList(L) ->
+    parseGameList(L, []).
+
+
+parseGameList(GameList, Accumulator) ->
+    io:format("parsing bro~n"),
+    case GameList of
+        [Game | Rest] ->
+            io:format("parseGameList ~p~p~n", [Game, Accumulator]),
+            parseGameList(Rest, lists:flatten(Game) ++ Accumulator);
+        [] -> Accumulator
+    end.
+
+
+cooperativeGameListReq(Port) ->
+    cooperativeGameListReq('localhost', Port).
+
+
+cooperativeGameListReq(Ip, Port) ->
+    receive
+        {get, PCommandPid, Pid} ->
+            Servers = serverList(Ip, Port),
+            io:format("servers ~p~n",[Servers]),
+            spawn(?MODULE, gameListReq, [Servers, PCommandPid, Pid])
+    end,
+    cooperativeGameListReq(Ip, Port).
+
+
+gameListReq(Servers, PCommandPid, Pid) ->
+    gameListReq(Servers, PCommandPid, Pid, []).
+
+
+gameListReq(Servers, PCommandPid, Pid, Games) ->
+    case Servers of
+        [Server | Rest] ->
+            Ip = Server#url.ip,
+            Port = Server#url.port,
+            {ok, Socket} = gen_tcp:connect(Ip, Port, [{active,false}, {packet,0}]),
+            gen_tcp:send(Socket, "COOP LSG"),
+            case gen_tcp:recv(Socket, 0) of
+                {ok, "OK COOP LSG " ++ L} ->
+                    gen_tcp:close(Socket),
+                    gameListReq(Rest, PCommandPid, Pid, Games ++ L);
+                _ ->
+                    gen_tcp:close(Socket),
+                    error
+            end;
+        [] -> Pid!{gameList, PCommandPid, Games}
     end.
 
 game(R) ->
