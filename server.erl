@@ -100,9 +100,27 @@ pcommand(Command, Socket) ->
                     io:format("llego nomas ~p~n", [L]),
                     gen_tcp:send(Socket, "OK COOP LSG " ++ L)
             end;
-        "ACC " ++ Rest ->
-            io:format("~s~n", [Command]),
-            gen_tcp:send(Socket, "OK " ++ Command);
+        "ACC " ++ (Rest) ->
+            io:format("ACC ~s~n", [Rest]),
+            Rest_ = string:split(Rest, " "),
+            case length(Rest_) of
+                2 ->
+                    Name = lists:nth(1, Rest_),
+                    GameId = lists:nth(2, Rest_),
+                    case checkIfNameExists(Name) of
+                        false -> gen_tcp:send(Socket, "ERROR ACC");
+                        true ->
+                            GameListPid = global:whereis_name("game_list"),
+                            GameListPid!{addPlayer, Name, GameId, self()},
+                            receive
+                                ok -> gen_tcp:send(Socket, "OK ACC");
+                                error -> gen_tcp:send(Socket, "ERROR ACC")
+                            end
+                    end;
+                _ ->
+                    io:format("Bad command~n"),
+                    gen_tcp:send(Socket, "ERROR ACC")
+            end;
         _ ->
             io:format("Unexpected~n"),
             gen_tcp:send(Socket, "ERROR No Implementado")
@@ -265,7 +283,18 @@ gameList(GameList) ->
             gameList(GameList);
         {gameList, PCommandPid, Games} ->
             TotalListGames = (parseGameList(GameList)) ++ Games,
-            PCommandPid!TotalListGames
+            PCommandPid!TotalListGames;
+        {addPlayer, Name, GameId, Pid} ->
+            case isAddPlayerAvailable(GameList, Name, GameId) of
+                {ok, NewGameList} ->
+                    Pid!ok,
+                    gameList(NewGameList);
+                {error, Reason} ->
+                    io:format("Error adding player ~s~n", [Reason]),
+                    Pid!error,
+                    gameList(GameList)
+            end
+
     end,
     gameList(GameList).
 
@@ -323,5 +352,33 @@ gameListReq(Servers, PCommandPid, Pid, Games) ->
         [] -> Pid!{gameList, PCommandPid, Games}
     end.
 
-game(R) ->
-    io:format("game ~p~n", [R]).
+isAddPlayerAvailable(GameList, Name, GameId) ->
+    isAddPlayerAvailable([], GameList, Name, GameId).
+
+isAddPlayerAvailable(Front, Back, Name, GameId) ->
+    case Back of
+        [] -> {error, "Game does not exists"};
+        [Game | Rest] ->
+            io:format("comparing ~s ~s~n", [Game#gameState.id, GameId]),
+            if
+                Game#gameState.id == GameId ->
+                    if
+                        Game#gameState.player2 == "" ->
+                            UpdGame = #gameState{
+                                id = Game#gameState.id,
+                                player1 = Game#gameState.player1,
+                                player2 = Name,
+                                watchers = Game#gameState.watchers,
+                                state = Game#gameState.state
+                            },
+                            io:format("new record with ~s ~s ~s~n", [UpdGame#gameState.id, UpdGame#gameState.player1, UpdGame#gameState.player2]),
+                            L = Front  ++ [UpdGame | Rest],
+                            io:format("printing list ~p~n", [L]),
+                            {ok, L};
+
+                        true ->
+                            {error, "Game was occupied"}
+                    end;
+                true -> isAddPlayerAvailable([Front | [Game]], Rest, Name, GameId)
+            end
+    end.
