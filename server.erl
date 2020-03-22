@@ -3,6 +3,7 @@
 
 
 -record(gameState, {
+    id="",
     player1="",
     player2="",
     watchers=[],
@@ -70,10 +71,15 @@ pcommand(Command, Socket) ->
             end;
         "NEW " ++ Name ->
             io:format("~s: ~s~n", [Name, Command]),
-            GameListPid = global:whereis_name("game_list"),
-            GameListPid!{add, self()},
-            receive
-                {ok, GameId} -> gen_tcp:send(Socket, "OK NEW " ++ GameId);
+            %% First, check if name exists
+            case checkIfNameExists(Name) of
+                true ->
+                    GameListPid = global:whereis_name("game_list"),
+                    GameListPid!{add, Name, self()},
+                    receive
+                        {ok, GameId} -> gen_tcp:send(Socket, "OK NEW " ++ GameId);
+                        _ -> gen_tcp:send(Socket, "ERROR NEW")
+                    end;
                 _ -> gen_tcp:send(Socket, "ERROR NEW")
             end;
         "LSG " ++ Name ->
@@ -83,9 +89,7 @@ pcommand(Command, Socket) ->
             receive
                 L ->
                     io:format("llego nomas ~p~n", [L]),
-                    LL = parseGameList(L),
-                    io:format("retorna ~s~n",[LL]),
-                    gen_tcp:send(Socket, "OK LSG " ++ LL)
+                    gen_tcp:send(Socket, "OK LSG " ++ L)
             end;
         "COOP LSG" ->
             io:format("COOP LSG~n"),
@@ -94,9 +98,7 @@ pcommand(Command, Socket) ->
             receive
                 L ->
                     io:format("llego nomas ~p~n", [L]),
-                    LL = parseGameList(L ++ [1]),
-                    io:format("retorna ~s~n",[LL]),
-                    gen_tcp:send(Socket, "OK COOP LSG " ++LL)
+                    gen_tcp:send(Socket, "OK COOP LSG " ++ L)
             end;
         "ACC " ++ Rest ->
             io:format("~s~n", [Command]),
@@ -196,6 +198,20 @@ attendToCoopNameReq(Name) ->
     end.
 
 
+checkIfNameExists(Name) ->
+    UserNamesPid = global:whereis_name("name_list"),
+    UserNamesPid!{contains, Name, self()},
+    io:format("checkIfNameExists~n"),
+    receive
+        true -> true;
+        false ->
+            COOP = global:whereis_name("cooperative_user_name"),
+            COOP!{contains, Name, self()},
+            receive
+                Val -> Val
+            end
+    end.
+
 % Process with list of games
 
 %% keep list of games in this server
@@ -219,43 +235,55 @@ gameCounter(Ip, Port) ->
 
 gameCounterPrefix(N, Prefix) ->
     receive
-        {add, Pid, PCommandPid} ->
+        {add, Name, Pid, PCommandPid} ->
             StrN = lists:flatten(io_lib:format("~p", [N])),
-            Pid!{new, Prefix ++ ("_" ++ StrN), PCommandPid},
+            Pid!{new, Name, Prefix ++ ("_" ++ StrN), PCommandPid},
             gameCounterPrefix(N + 1, Prefix)
     end.
 
 gameList(GameList) ->
     receive
-        {add, Pid} ->
+        {add, Name, Pid} ->
             io:format("gameList receive add~n"),
             GameCounterPid = global:whereis_name("game_counter"),
-            GameCounterPid!{add, self(), Pid},
+            GameCounterPid!{add, Name, self(), Pid},
             gameList(GameList);
-        {new, GameId, Pid} ->
+        {new, Name, GameId, Pid} ->
             Pid!{ok, GameId},
-            gameList(GameList ++ [GameId]);
+            Game = #gameState{
+                id = GameId,
+                player1 = Name
+            },
+            io:format("adding new game ~s ~s~n", [Game#gameState.id, Game#gameState.player1]),
+            gameList(GameList ++ [Game]);
         {get, Pid} ->
             CoopGameListPid = global:whereis_name("cooperative_game_list"),
             CoopGameListPid!{get, Pid, self()};
         {getCoop, Pid} ->
-            Pid!GameList,
+            L = parseGameList(GameList),
+            Pid!L,
             gameList(GameList);
         {gameList, PCommandPid, Games} ->
-            PCommandPid!Games
+            TotalListGames = (parseGameList(GameList)) ++ Games,
+            PCommandPid!TotalListGames
     end,
     gameList(GameList).
 
 parseGameList(L) ->
-    parseGameList(L, []).
+    parseGameList(L, "").
 
 
 parseGameList(GameList, Accumulator) ->
-    io:format("parsing bro~n"),
     case GameList of
         [Game | Rest] ->
-            io:format("parseGameList ~p~p~n", [Game, Accumulator]),
-            parseGameList(Rest, lists:flatten(Game) ++ Accumulator);
+            Id = "Id: " ++ Game#gameState.id,
+            P1 = " Player 1: " ++ Game#gameState.player1,
+            P2 = " Player 2: " ++ (case Game#gameState.player2 of
+                                      "" -> "---";
+                                      Str -> Str
+                                  end),
+            StrGame = ("\n" ++ (Id ++ (P1 ++ (P2)))),
+            parseGameList(Rest, StrGame ++ (Accumulator));
         [] -> Accumulator
     end.
 
@@ -268,7 +296,6 @@ cooperativeGameListReq(Ip, Port) ->
     receive
         {get, PCommandPid, Pid} ->
             Servers = serverList(Ip, Port),
-            io:format("servers ~p~n",[Servers]),
             spawn(?MODULE, gameListReq, [Servers, PCommandPid, Pid])
     end,
     cooperativeGameListReq(Ip, Port).
