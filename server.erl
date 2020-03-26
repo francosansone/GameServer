@@ -158,7 +158,7 @@ pcommand(Command, Socket) ->
                         true ->
                             case leaveGame(Name, GameId) of
                                 {ok, Game, GameStr} ->
-                                    gen_tcp:send(Socket, "OK LEA " ++ GameStr),
+                                    gen_tcp:send(Socket, "OK LEA"),
                                     updateInterested(Game, GameStr, Name);
                                 error -> gen_tcp:send(Socket, "ERROR LEA")
                             end
@@ -166,6 +166,15 @@ pcommand(Command, Socket) ->
                 _ ->
                     io:format("Bad command~n"),
                     gen_tcp:send(Socket, "ERROR ACC")
+            end;
+        "BYE " ++ Name ->
+            case checkIfNameExists(Name) of
+                true ->
+                    case leaveGames(Name) of
+                        ok ->
+                            gen_tcp:send(Socket, "OK LEA");
+                        error -> gen_tcp:send(Socket, "ERROR LEA")
+                    end
             end;
         "COOP GET " ++ GameId ->
             GameListPid = global:whereis_name("game_list"),
@@ -217,11 +226,10 @@ totalServerList() ->
 
 serverList(Ip, Port) ->
     L = totalServerList(),
-    LL = lists:filter(fun(X)->
+    lists:filter(fun(X)->
         P = X#url.port /= Port,
         I = X#url.ip /= Ip,
-        P or I end, L),
-    LL.
+        P or I end, L).
 
 
 %% Process for user purposes
@@ -634,7 +642,7 @@ updateGameStrCoop(Game, Servers) ->
 %% Try to add a player in a game
 
 addPlayerAvailable(Name, GameId) ->
-    Fun = fun(X, Y) -> tryUpdatePlayer2(X,Y) end,
+    Fun = fun(X, Y) -> tryUpdatePlayer(X,Y) end,
     changeGameStatus(GameId, Fun, Name).
 
 addWatcher(Name, GameId) ->
@@ -644,6 +652,28 @@ addWatcher(Name, GameId) ->
 leaveGame(Name, GameId) ->
     Fun = fun(X, Y) -> tryLeaveGame(X, Y) end,
     changeGameStatus(GameId, Fun, Name).
+
+%% bye command
+leaveGames(Name) ->
+    GameListPid = global:whereis_name("game_list"),
+    GameListPid!{get, self()},
+    receive
+        Games ->
+            GamesList = string:split(Games, "\n", all),
+            GamesList_ = lists:filter(fun(X) -> not string:is_empty(X) end, GamesList),
+            GamesList__ = lists:map(fun(X) -> string:split(X, " ", all) end, GamesList_),
+            GamesList___ = lists:filter(fun(X) -> length(X) > 2 end, GamesList__),
+            GameIdList = lists:map(fun(X) -> lists:nth(2, X) end, GamesList___),
+            lists:foreach(fun(X) -> leaveGame(Name, X) end, GameIdList)
+    end.
+
+leaveGamesRecursive(Name, Games) ->
+    case Games of
+        [Game | Rest] ->
+            leaveGame(Name, Game#gameState.id),
+            leaveGamesRecursive(Name, Rest);
+        [] -> ok
+    end.
 
 changeGameStatus(GameId, Fun, Change) ->
     GameListPid = global:whereis_name("game_list"),
@@ -678,11 +708,12 @@ changeGameStatus(GameId, Fun, Change) ->
                             end
                     end;
                 {error, Reason} ->
-                    io:format("Game ~s not found~n", [GameId])
+                    io:format("Game ~s not found~n", [GameId]),
+                    error
             end
     end.
 
-tryUpdatePlayer2(Game, Name) ->
+tryUpdatePlayer(Game, Name) ->
     io:format("tryUpdatePlayer2 ~s ~s~n", [Game#gameState.id, Name]),
     case Game#gameState.player2 of
         "-" ->
@@ -694,8 +725,18 @@ tryUpdatePlayer2(Game, Name) ->
                 watchers = Game#gameState.watchers
             };
         _ ->
-            io:format("Game has already occupied~n"),
-            error
+            case Game#gameState.player1 of
+                "-" ->
+                    #gameState{
+                        id = Game#gameState.id,
+                        player1 = Name,
+                        player2 = Game#gameState.player2,
+                        watchers = Game#gameState.watchers
+                    };
+                _ ->
+                    io:format("Game has already occupied~n"),
+                    error
+            end
     end.
 
 tryAddWatcher(Game, Name) ->
@@ -717,17 +758,36 @@ tryAddWatcher(Game, Name) ->
 
 tryLeaveGame(Game, Name) ->
     io:format("tryLeaveGame ~s ~s ~p~n", [Game#gameState.id, Name, Game#gameState.watchers]),
-    case lists:member(Name, Game#gameState.watchers) of
-        true ->
+    if
+        Game#gameState.player1 == Name ->
+            #gameState{
+                id = Game#gameState.id,
+                player1 = "-",
+                player2 = Game#gameState.player2,
+                watchers = Game#gameState.watchers
+            };
+
+        Game#gameState.player2 == Name ->
             #gameState{
                 id = Game#gameState.id,
                 player1 = Game#gameState.player1,
-                player2 = Game#gameState.player2,
-                watchers = lists:delete(Name, Game#gameState.watchers)
+                player2 = "-",
+                watchers = Game#gameState.watchers
             };
-        _ ->
-            io:format("Player ~s is not in watcher list of game ~s~n", [Name, Game#gameState.id]),
-            error
+
+        true ->
+            case lists:member(Name, Game#gameState.watchers) of
+                true ->
+                    #gameState{
+                        id = Game#gameState.id,
+                        player1 = Game#gameState.player1,
+                        player2 = Game#gameState.player2,
+                        watchers = lists:delete(Name, Game#gameState.watchers)
+                    };
+                _ ->
+                    io:format("Player ~s is not in this game ~s~n", [Name, Game#gameState.id]),
+                    error
+            end
     end.
 
 searchGame(GameId, GameList) ->
