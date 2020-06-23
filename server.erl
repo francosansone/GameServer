@@ -7,7 +7,8 @@
     player1="-",
     player2="-",
     watchers=[],
-    state={}
+    turn=1,
+    state=[]
 }).
 
 -record(url, {id="server0", ip='localhost', port=8000}).
@@ -167,13 +168,33 @@ pcommand(Command, Socket) ->
                     io:format("Bad command~n"),
                     gen_tcp:send(Socket, "ERROR ACC")
             end;
+        "PLA " ++ Rest ->
+            io:format("PLA ~s~n", [Rest]),
+            Rest_ = string:split(Rest, " ", all),
+            case length(Rest_) of
+                3 ->
+                    Name = lists:nth(1, Rest_),
+                    case checkIfNameExists(Name) of
+                        false -> gen_tcp:send(Socket, "ERROR PLA");
+                        true ->
+                            GameId = lists:nth(2, Rest_),
+                            Play = parsePlay(lists:nth(3, Rest_)),
+                            case makeAMove({Name, Play}, GameId) of
+                                {ok, Game, GameStr} ->
+                                    gen_tcp:send(Socket, "OK PLAY"),
+                                    updateInterested(Game, GameStr, Name);
+                                error -> gen_tcp:send(Socket, "ERROR PLAY")
+                            end
+                    end;
+                _ -> gen_tcp:send(Socket, "ERROR PLA")
+            end;
         "BYE " ++ Name ->
             case checkIfNameExists(Name) of
                 true ->
                     case leaveGames(Name) of
                         ok ->
-                            gen_tcp:send(Socket, "OK LEA");
-                        error -> gen_tcp:send(Socket, "ERROR LEA")
+                            gen_tcp:send(Socket, "OK BYE");
+                        error -> gen_tcp:send(Socket, "ERROR BYE")
                     end
             end;
         "COOP GET " ++ GameId ->
@@ -653,6 +674,10 @@ leaveGame(Name, GameId) ->
     Fun = fun(X, Y) -> tryLeaveGame(X, Y) end,
     changeGameStatus(GameId, Fun, Name).
 
+makeAMove(Change, GameId) ->
+    Fun = fun(X,Y) -> tryToPlay(X, Y) end,
+    changeGameStatus(GameId, Fun, Change).
+
 %% bye command
 leaveGames(Name) ->
     GameListPid = global:whereis_name("game_list"),
@@ -667,13 +692,10 @@ leaveGames(Name) ->
             lists:foreach(fun(X) -> leaveGame(Name, X) end, GameIdList)
     end.
 
-leaveGamesRecursive(Name, Games) ->
-    case Games of
-        [Game | Rest] ->
-            leaveGame(Name, Game#gameState.id),
-            leaveGamesRecursive(Name, Rest);
-        [] -> ok
-    end.
+leaveGamesRecursive(Name, [Game | Rest]) ->
+    leaveGame(Name, Game#gameState.id),
+    leaveGamesRecursive(Name, Rest);
+leaveGamesRecursive(_, []) -> ok.
 
 changeGameStatus(GameId, Fun, Change) ->
     GameListPid = global:whereis_name("game_list"),
@@ -682,8 +704,11 @@ changeGameStatus(GameId, Fun, Change) ->
         {ok, Game} ->
             case Fun(Game, Change) of
                 error -> error;
+                {error, Reason} ->
+                    io:format("error en changeGameStatus ~s~n", [Reason]),
+                    error;
                 UpdGame ->
-                    io:format("receive aupdated game ~s~s~n",[UpdGame#gameState.id, UpdGame#gameState.player2]),
+                    io:format("receive updated game ~s~s~n",[UpdGame#gameState.id, UpdGame#gameState.player2]),
                     GameListPid!{update, UpdGame},
                     GameStr = gameStateToStr(UpdGame),
                     io:format("ya me voy~n"),
@@ -696,7 +721,9 @@ changeGameStatus(GameId, Fun, Change) ->
                 {ok, GameStr} ->
                     io:format("receive ~s~n", [GameStr]),
                     case strToGameState(GameStr) of
-                        error -> io:format("bad record received~n");
+                        error ->
+                            io:format("bad record received~n"),
+                             error;
                         Game ->
                             case Fun(Game, Change) of
                                 error -> error;
@@ -718,25 +745,16 @@ tryUpdatePlayer(Game, Name) ->
     case Game#gameState.player2 of
         "-" ->
             io:format("case 1 bro~n"),
-            #gameState{
+            startGame(#gameState{
                 id = Game#gameState.id,
                 player1 = Game#gameState.player1,
                 player2 = Name,
                 watchers = Game#gameState.watchers
-            };
+            });
         _ ->
-            case Game#gameState.player1 of
-                "-" ->
-                    #gameState{
-                        id = Game#gameState.id,
-                        player1 = Name,
-                        player2 = Game#gameState.player2,
-                        watchers = Game#gameState.watchers
-                    };
-                _ ->
-                    io:format("Game has already occupied~n"),
-                    error
-            end
+            io:format("Game has already occupied~n"),
+            error
+%%            end
     end.
 
 tryAddWatcher(Game, Name) ->
@@ -790,6 +808,178 @@ tryLeaveGame(Game, Name) ->
             end
     end.
 
+startGame(Game) ->
+    #gameState{
+        id = Game#gameState.id,
+        player1 = Game#gameState.player1,
+        player2 = Game#gameState.player2,
+        watchers = Game#gameState.watchers,
+        turn = 1,
+        state = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+    }.
+
+allowedPlay() ->
+    [[[1, 1], [1,2]],
+        [[1, 1], [2,1]],
+        [[1,2], [1,3]],
+        [[1,2], [2,2]],
+        [[1,3], [2,3]],
+        [[2,1], [3,1]],
+        [[2,1], [2,2]],
+        [[2,2], [3,2]],
+        [[2,2], [2,3]],
+        [[2,3], [3,3]],
+        [[1,1], [2,2]],
+        [[2,2], [1,3]],
+        [[2.2], [3,1]],
+        [[2,2], [3,3]],
+        [[3,2], [3,3]]
+    ].
+
+isAllowedPlay(Play) ->
+    Plays = allowedPlay(),
+    lists:foldl(
+        fun(X, Acc) ->
+            case Acc of
+                false ->
+                    lists:member(lists:nth(1, Play), X) and lists:member(lists:nth(2, Play), X);
+                T -> T
+            end
+        end,
+        false,
+        Plays).
+
+tryToPlay(Game, Change) ->
+    Name = element(1, Change),
+    io:format("tryToPlay ~s ~s ~s~n", [Game#gameState.player1, Game#gameState.player2, Name]),
+    Play = element(2, Change),
+    %% check player
+    if
+        Name == Game#gameState.player1 ->
+            checkTurn(Play, 1, Game);
+        Name == Game#gameState.player2 ->
+            checkTurn(Play, 2, Game);
+        true -> {error, "Player is not in this game"}
+    end.
+
+%% check turn
+checkTurn(Play, Player, Game) ->
+    io:format("checkTurn Player: ~p Turn: ~p ~n", [Player, Game#gameState.turn]),
+    if
+        Player == Game#gameState.turn ->
+            io:format("calling make a play ~p~n", [Play]),
+            case length(Play) of
+                1 -> tryToPlay1(Play, Player, Game);
+                2 -> tryToPlay2(Play, Player, Game);
+                _ -> {error, "UNACCEPTABLE PLAY"}
+            end;
+        true -> {error, "IT'S NOT YOUR TURN"}
+    end.
+
+tryToPlay1(Play, Player, Game) ->
+    Play_ = lists:nth(1, Play),
+    io:format("tryToPlay1 ~p ~p~n", [Play, Play_]),
+    ListValue = 3*(lists:nth(1, Play_) - 1) + lists:nth(2, Play_),
+    State = Game#gameState.state,
+    io:format("tryToPlay1 ~p ~p ~n", [ListValue, State]),
+    case lists:nth(ListValue, State) == 0 of
+        false -> {error, "PLACE IS OCCUPIED"};
+        _ ->
+            case count(Player, State) < 3 of
+                false -> {error, "UNACCEPTABLE PLAY"};
+                _ ->
+                    NewState = lists:sublist(State, ListValue - 1) ++
+                            [Player] ++ lists:sublist(State, ListValue + 1, 9),
+                    NewGame = Game#gameState{
+                        state = NewState,
+                        turn = case Game#gameState.turn of 1 -> 2; _ -> 1 end
+                    },
+                    io:format("tryToPlay ~p~n", [NewGame]),
+                    Val = victoryCheck(NewGame#gameState.state),
+                    io:format("tryToPlay1 ~p~n", [Val]),
+                    NewGame
+            end
+    end.
+
+
+tryToPlay2(Play, Player, Game) ->
+    io:format("tryToPlay2 ~p ~p~n", [Play, Player]),
+    From = lists:nth(1, Play),
+    ListFrom = 3*(lists:nth(1, From) - 1) + lists:nth(2, From),
+    To = lists:nth(2, Play),
+    ListTo = 3*(lists:nth(1, To) - 1) + lists:nth(2, To),
+    State = Game#gameState.state,
+    case (lists:nth(ListFrom, State) == Player) and (lists:nth(ListTo, State) == 0) of
+        false -> {error, "UNACCEPTABLE PLAY"};
+        _ -> case isAllowedPlay(Play) of
+                 false -> {error, "UNACCEPTABLE PLAY"};
+                 _ ->
+                     case listSwap(State, ListFrom, ListTo) of
+                         error -> {error, "UNACCEPTABLE PLAY"};
+                         NewState ->
+                             NewGame = Game#gameState{
+                                 state = NewState,
+                                 turn = case Game#gameState.turn of 1 -> 2; _ -> 1 end
+                             },
+                             io:format("tryToPlay2 ~p~n", [NewGame]),
+                             Val = victoryCheck(NewGame#gameState.state),
+                             io:format("tryToPlay2 ~p~n", [Val]),
+                             NewGame
+                     end
+             end
+    end.
+
+
+%% Functions to check victory
+victoryCheck(State) ->
+    case horizontalCheck(State) of
+        no -> case verticalCheck(State) of
+                  no -> case diagonalCheck(State) of
+                            no -> no;
+                            {yes, Val} -> {yes, Val}
+                        end;
+                  {yes, Val} -> {yes, Val}
+              end;
+        {yes, Val} -> {yes, Val}
+    end.
+
+isLine(A, B, C) ->
+    if
+        (A == B) and (B == C) and (A /= 0) -> {yes, A};
+        true -> no
+    end.
+
+horizontalCheck([A , B, C | Rest]) ->
+    case isLine(A, B, C) of
+        no -> horizontalCheck(Rest);
+        {yes, Val} ->  {yes, Val}
+    end;
+horizontalCheck([]) -> no.
+
+verticalCheck(State) ->
+    List = [lists:nth(1, State),
+        lists:nth(4, State),
+        lists:nth(7, State),
+        lists:nth(2, State),
+        lists:nth(5, State),
+        lists:nth(8, State),
+        lists:nth(3, State),
+        lists:nth(6, State),
+        lists:nth(9, State)],
+    io:format("verticalCheck~p~n", [List]),
+    horizontalCheck(List).
+
+diagonalCheck(State) ->
+    List = [lists:nth(1, State),
+        lists:nth(5, State),
+        lists:nth(9, State),
+        lists:nth(3, State),
+        lists:nth(5, State),
+        lists:nth(7, State)],
+    io:format("verticalCheck~p~n", [List]),
+    horizontalCheck(List).
+%%%%%
+
 searchGame(GameId, GameList) ->
     case GameList of
         [Game | Rest] ->
@@ -805,6 +995,7 @@ searchGame(GameId, GameList) ->
 
 
 gameStateToStr(Game) ->
+    io:format("gameStateToStr ~p~n", [Game]),
     Id = Game#gameState.id,
     P1 = " " ++ Game#gameState.player1,
     case Game#gameState.player2 of
@@ -813,12 +1004,14 @@ gameStateToStr(Game) ->
     end,
     if
         length(Game#gameState.watchers) > 0 ->
-            io:format("gameStateToStr ~p~n", [Game#gameState.watchers]),
             Watchers = " <" ++ (string:join(Game#gameState.watchers, ",") ++  ">");
             true -> Watchers = " <>"
     end,
-    GameStr = Id ++ (P1 ++ (P2 ++ (Watchers))),
-    io:format("gameStateToStr ~s~n", [GameStr]),
+    Turn = " " ++ integer_to_list(Game#gameState.turn),
+    State = " " ++ lists:foldl(fun(X, Acc) ->  Acc ++ lists:flatten(io_lib:format("~p", [X])) ++ "," end,
+        "", Game#gameState.state),
+    GameStr = Id ++ P1 ++ P2 ++ Watchers ++ Turn ++ State,
+    io:format("gameStateToStr ~s ~s ~s~n", [Id, P2, GameStr]),
     GameStr.
 
 parseStrWatchersToList(StrWatchers) ->
@@ -837,20 +1030,98 @@ parseStrWatchersToList(StrWatchers) ->
 strToGameState(StrGame) ->
     ListStrGame = string:split(StrGame, " ", all),
     case length(ListStrGame) of
-        4 ->
+        6 ->
             Id = lists:nth(1, ListStrGame),
             P1 = lists:nth(2, ListStrGame),
             P2 = lists:nth(3, ListStrGame),
             Watchers = parseStrWatchersToList(lists:nth(4, ListStrGame)),
+            Turn = list_to_integer(lists:nth(5, ListStrGame)),
+            StrState = lists:nth(6, ListStrGame),
+            case length(StrState) of
+                0 -> State =[];
+                _ ->
+                    _State = lists:sublist(string:split(StrState, ",", all), 1, 9),
+                    io:format("strToGameState ~s ~p~n", [string:split(StrState, ",", all), _State]),
+                    State = lists:map(fun(X) -> list_to_integer(X) end, _State),
+                    io:format("strToGameState ~s ~p ~n", [StrState, State])
+            end,
             Game = #gameState{
                 id = Id,
                 player1 = P1,
                 player2 = P2,
                 watchers = Watchers,
-                state = {}
+                turn = Turn,
+                state = State
             },
             Game;
         _ ->
-            io:format("Bad string ~s~n", [ListStrGame]),
+            io:format("Bad string ~s ~p~n", [ListStrGame, length(ListStrGame)]),
             #gameState{}
+    end.
+
+parsePlay(Play) ->
+    Plays = string:split(Play, "->", all),
+    io:format("parsePlay ~p ~p~n", [Plays, length(Plays)]),
+    case length(Plays) of
+        2 -> parsePlay2(Plays);
+        1 -> parsePlay1(Play);
+        _ -> error
+    end.
+
+parsePlay1(Play) ->
+    Places = string:split(Play, ",", all),
+    P1 = lists:nth(1, Places),
+    P2 = lists:nth(2, Places),
+    io:format("parsePlay1 ~p~p~n", [P1, P2]),
+    case length(Places) of
+        2 ->
+            X = toInteger(P1),
+            Y = toInteger(P2),
+            if
+                (X == error) or (Y == error) -> error;
+                true -> [[X | [Y]]]
+            end;
+        _ -> error
+    end.
+
+parsePlay2(Play) ->
+    From = lists:nth(1, Play),
+    To = lists:nth(2, Play),
+    io:format("parsePlay2 ~s ~s ~s~n", [Play, From, To]),
+    case parsePlay1(From) of
+        error ->
+            io:format("error caso 1~n"),
+            error;
+        IntFrom ->
+            case parsePlay1(To) of
+                error ->
+                    io:format("error caso 2~n"),
+                    error;
+                IntTo -> [lists:nth(1, IntFrom) | [lists:nth(1, IntTo)]]
+            end
+    end.
+
+toInteger(Value) ->
+    io:format("~s~n", [Value]),
+    try list_to_integer(Value)
+    catch
+        _:_ -> error
+    end.
+
+count(_, []) -> 0;
+count(X, [X|XS]) -> 1 + count(X, XS);
+count(X, [_|XS]) -> count(X, XS).
+
+listSwap(List, A, B) ->
+    Size = length(List),
+    if
+        ((A < 1) or (A > Size) or (B < 1) or (B > Size)) ->
+            error;
+        true ->
+            ValueA = lists:nth(A, List),
+            ValueB = lists:nth(B, List),
+            L1 = lists:sublist(List, A - 1) ++ [ValueB]
+                ++ lists:sublist(List, A + 1, Size - A),
+            lists:sublist(L1, B - 1) ++ [ValueA]
+            ++ lists:sublist(L1, B + 1, Size - B)
     end.

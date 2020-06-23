@@ -27,7 +27,7 @@ send_data(Socket) ->
     receive
         {userName, NewName} ->
             io:format("Update user name ~s~n", [NewName]),
-            send_data(Socket, NewName);
+            send_data(Socket);
         ok ->
              send_data(Socket);
         _ ->
@@ -52,8 +52,8 @@ send_data(Socket, UserName) ->
 read_stdin() ->
     case io:get_line("") of
         eof ->
-            init:stop();
-        "\n" ->
+            io:format("eof? ~n");
+        "\n" -> 
             {ok, ""};
         Line->
             Res = string:sub_string(Line, 1, string:len(Line) - 1),
@@ -83,7 +83,8 @@ controller(Socket, Pid, Prompt) ->
                 "OK CON " ++ Name ->
                     Pid!{userName, Name},
                     Prompt!{upd, "update bro~n"};
-                _ ->
+                Response ->
+                    io:format("llego algo! ~s~n", [Response]),
                     Pid!ok
             end,
             controller(Socket, Pid, Prompt);
