@@ -8,10 +8,11 @@
     player2="-",
     watchers=[],
     turn=1,
-    state=[]
+    state=[],
+    victory=0
 }).
 
--record(url, {id="server0", ip='localhost', port=8000}).
+-record(url, {id="server0", ip='localhost', port=8000, queue=0, socket="", isLocal=false}).
 
 server(Port) ->
     {ok, ListenSocket} = gen_tcp:listen(Port, [{active,false}, {packet,0}]),
@@ -26,25 +27,113 @@ initControllers(Port) ->
     CoopGameListPid = spawn(?MODULE, cooperativeGameListReq, [Port]),
     GameCounterPid = spawn(?MODULE, gameCounter, [Port]),
     CoopResolveUpdPid = spawn(?MODULE, cooperativeResolveUpdate, ['localhost', Port]),
+    ServerList = initConnections('localhost', Port),
+    PBalancePid = spawn(?MODULE, pbalance, [ServerList]),
+    spawn(?MODULE, pstat, ['localhost', Port, ServerList]),
     global:register_name("name_list", UserNamesPid),
     global:register_name("cooperative_user_name", CoopUserNameReq),
     global:register_name("game_list", GameListPid),
     global:register_name("cooperative_game_list", CoopGameListPid),
     global:register_name("game_counter", GameCounterPid),
-    global:register_name("cooperative_resolve_upd", CoopResolveUpdPid).
+    global:register_name("cooperative_resolve_upd", CoopResolveUpdPid),
+    global:register_name("p_balance", PBalancePid).
+
+sleep(Time) ->
+    receive
+        after Time ->
+            true
+        end.
+
+initConnections(Ip, Port) ->
+    sleep(5000),
+    ServerList = totalServerList(),
+    NewServerList = lists:map(fun(X) ->
+        case (X#url.ip == Ip) and (X#url.port == Port) of
+            true -> X#url{isLocal=true};
+            _ ->
+                {ok, Socket} = gen_tcp:connect(X#url.ip, X#url.port, [{active,false}, {packet,0}]),
+                X#url{socket = Socket}
+        end
+    end, ServerList),
+    NewServerList.
+
+pstat(Ip, Port, Servers) ->
+    io:format("pstat ~p~n", [Servers]),
+    LL = lists:filter(fun(X)->
+        P = X#url.port == Port,
+        I = X#url.ip == Ip,
+        P and I end, Servers),
+    ServerId = (lists:nth(1, LL))#url.id,
+    Index = lists:sublist(ServerId, 7, length(ServerId)),
+    Prefix = "Queue " ++ Index ++ " ",
+    ServerSocketList = lists:filter(fun(X)->
+        P = X#url.port /= Port,
+        I = X#url.ip /= Ip,
+        P or I end, Servers),
+    meassureQueue(ServerSocketList, Prefix).
+
+meassureQueue(Servers, Prefix) ->
+    Queue = erlang:statistics(total_active_tasks),
+    Str_Queue = integer_to_list(Queue),
+    lists:foreach(fun(Server) ->
+        gen_tcp:send(Server#url.socket, Prefix ++ Str_Queue) end, Servers),
+    sleep(1000),
+    meassureQueue(Servers, Prefix).
 
 dispatcher(ListenSocket, Port) ->
     {ok, Socket} = gen_tcp:accept(ListenSocket),
     spawn(?MODULE, psocket, [Socket]),
     dispatcher(ListenSocket, Port).
 
+pbalance(ServerList) ->
+    receive
+        {newStatus, Index, Queue} ->
+            Index_ = list_to_integer(Index) + 1,
+            Front = lists:sublist(ServerList, Index_ - 1),
+            Back = lists:nthtail(Index_, ServerList),
+            Server = lists:nth(Index_, ServerList),
+            NewServer = Server#url{queue = Queue},
+            NewServerList = Front ++ [NewServer] ++ Back,
+            pbalance(NewServerList);
+        {lessLoaded, Command, Socket} ->
+            LocalQueue = erlang:statistics(total_active_tasks),
+            LocalServer = #url{isLocal=true, queue=LocalQueue},
+            Server = lists:foldl(fun(X, Acc) ->
+                io:format("in foldr ~p, ~p~n", [X, Acc]),
+                case not(X#url.isLocal) and (X#url.queue < Acc#url.queue) of
+                    true -> X;
+                    _ -> Acc
+                end
+            end, LocalServer, ServerList),
+            io:format("pbalance lessLoadad ~p ~p~n", [Server, Server#url.isLocal]),
+            spawn(?MODULE, pcommand, [Command, Socket]),
+            pbalance(ServerList)
+    end.
+
+
 
 psocket(Socket) ->
     io:format("psocket, ~p~n", [Socket]),
     case gen_tcp:recv(Socket, 0) of
         {ok, Command} ->
-            spawn(?MODULE, pcommand, [Command, Socket]),
-            psocket(Socket);
+            case Command of
+                    "Queue " ++ _Rest ->
+                        spawn(?MODULE, pcommand, [Command, Socket]),
+                        psocket(Socket);
+                    "pcommand" ++ _Rest ->
+                        spawn(?MODULE, pcommand, [Command, Socket]),
+                        psocket(Socket);
+                    "COOP " ++ _Rest ->
+                        spawn(?MODULE, pcommand, [Command, Socket]),
+                        psocket(Socket);
+                    "LOAD SERVER" ->
+                        spawn(?MODULE, pcommand, [Command, Socket]),
+                        psocket(Socket);
+                    _ ->
+                        PBalancePid = global:whereis_name("p_balance"),
+                        PBalancePid!{lessLoaded, Command, Socket},
+                        psocket(Socket)
+                end;
         {error, Reason} ->
             io:format("closed ~p~n",[Reason]),
             gen_tcp:close(Socket)
@@ -52,7 +141,6 @@ psocket(Socket) ->
 
 
 pcommand(Command, Socket) ->
-    io:format("pcommand ~p~n", [Command]),
     case Command of
         "CON " ++ Name ->
             io:format("Recibe nombre ~s~n", [Name]),
@@ -74,6 +162,10 @@ pcommand(Command, Socket) ->
                 true -> gen_tcp:send(Socket, "EXISTS COOP NAME");
                 false -> gen_tcp:send(Socket, "DOESNT EXISTS COOP NAME")
             end;
+        "COOP REMOVE NAME " ++ Name ->
+            io:format("receive cooperative req rm name ~s~n", [Name]),
+            NameListPid = global:whereis_name("name_list"),
+            NameListPid!{remove, Name};
         "NEW " ++ Name ->
             io:format("~s: ~s~n", [Name, Command]),
             %% First, check if name exists
@@ -119,6 +211,7 @@ pcommand(Command, Socket) ->
                                 {ok, Game, GameStr} ->
                                     gen_tcp:send(Socket, "OK ACC " ++ GameStr),
                                     updateInterested(Game, GameStr, Name);
+                                {error, Reason} -> gen_tcp:send(Socket, "ERROR ACC " ++ Reason);
                                 error -> gen_tcp:send(Socket, "ERROR ACC")
                             end
                     end;
@@ -140,7 +233,7 @@ pcommand(Command, Socket) ->
                                 {ok, Game, GameStr} ->
                                     gen_tcp:send(Socket, "OK OBS " ++ GameStr),
                                     updateInterested(Game, GameStr, Name);
-                                error -> gen_tcp:send(Socket, "ERROR OBS")
+                                {error, Reason} -> gen_tcp:send(Socket, "ERROR OBS " ++ Reason)
                     end
                 end;
                 _ ->
@@ -161,7 +254,7 @@ pcommand(Command, Socket) ->
                                 {ok, Game, GameStr} ->
                                     gen_tcp:send(Socket, "OK LEA"),
                                     updateInterested(Game, GameStr, Name);
-                                error -> gen_tcp:send(Socket, "ERROR LEA")
+                                {error, Reason} -> gen_tcp:send(Socket, "ERROR LEA " ++ Reason)
                             end
                     end;
                 _ ->
@@ -175,15 +268,26 @@ pcommand(Command, Socket) ->
                 3 ->
                     Name = lists:nth(1, Rest_),
                     case checkIfNameExists(Name) of
-                        false -> gen_tcp:send(Socket, "ERROR PLA");
+                        false -> gen_tcp:send(Socket, "ERROR PLAY");
                         true ->
                             GameId = lists:nth(2, Rest_),
-                            Play = parsePlay(lists:nth(3, Rest_)),
-                            case makeAMove({Name, Play}, GameId) of
-                                {ok, Game, GameStr} ->
-                                    gen_tcp:send(Socket, "OK PLAY"),
-                                    updateInterested(Game, GameStr, Name);
-                                error -> gen_tcp:send(Socket, "ERROR PLAY")
+                            case parsePlay(lists:nth(3, Rest_)) of
+                                error -> gen_tcp:send(Socket, "ERROR PLAY");
+                                Play ->
+                                    MoveRes = makeAMove({Name, Play}, GameId),
+                                    io:format("makeAMove returns ~p~n", [MoveRes]),
+                                    case MoveRes of
+                                        {ok, Game, GameStr} ->
+                                            if
+                                                Game#gameState.victory == 1 ->
+                                                    gen_tcp:send(Socket, "GAME FINISHED " ++ GameStr);
+                                                true ->
+                                                    gen_tcp:send(Socket, "OK PLAY " ++ GameStr)
+                                            end,
+                                            updateInterested(Game, GameStr, Name);
+                                        {error, Reason} -> gen_tcp:send(Socket, "ERROR PLAY " ++ Reason);
+                                        error -> gen_tcp:send(Socket, "ERROR PLAY")
+                                    end
                             end
                     end;
                 _ -> gen_tcp:send(Socket, "ERROR PLA")
@@ -193,9 +297,10 @@ pcommand(Command, Socket) ->
                 true ->
                     case leaveGames(Name) of
                         ok ->
-                            gen_tcp:send(Socket, "OK BYE");
-                        error -> gen_tcp:send(Socket, "ERROR BYE")
-                    end
+                            removeName(Name),
+                            gen_tcp:send(Socket, "OK BYE")
+                    end;
+                _ ->  gen_tcp:send(Socket, "ERROR BYE")
             end;
         "COOP GET " ++ GameId ->
             GameListPid = global:whereis_name("game_list"),
@@ -230,6 +335,13 @@ pcommand(Command, Socket) ->
                     end;
                 true -> gen_tcp:send(Socket, "ERROR COOP UPD NAME")
             end;
+        "Queue " ++ Rest ->
+            Values = string:split(Rest, " ", all),
+            PBalance = global:whereis_name("p_balance"),
+            PBalance!{newStatus, lists:nth(1, Values), lists:nth(2, Values)};
+        "LOAD SERVER" ->
+            spawn(?MODULE, loadserver, [500]),
+            gen_tcp:send(Socket, "OK");
         _ ->
             io:format("Unexpected~n"),
             gen_tcp:send(Socket, "ERROR No Implementado")
@@ -253,6 +365,15 @@ serverList(Ip, Port) ->
         P or I end, L).
 
 
+%% Just load server
+loadserver(N) ->
+    if
+        N > 0 ->
+            io:format("loadserver ~p~n", [N]),
+            loadserver(N-1);
+        true -> void
+    end.
+
 %% Process for user purposes
 
 %% Will be created a userSender thread for each user
@@ -260,7 +381,7 @@ userSender(Socket) ->
     receive
         {upd, Command} ->
             io:format("here send command ~s~n", [Command]),
-            gen_tcp:send(Socket, Command),
+            gen_tcp:send(Socket, "UPD " ++ Command),
             userSender(Socket)
 end.
 
@@ -287,7 +408,7 @@ updateInterested(Game, GameStr, Name) ->
 
 
 tryToUpdateUserLocally(Player, Command) ->
-    io:format("tryToUpdateUserLocally ~s~s~n", [Player, Command]),
+    io:format("tryToUpdateUserLocally ~s ~s~n", [Player, Command]),
     GameListPid = global:whereis_name("name_list"),
     GameListPid!{contains, Player, self()},
     receive
@@ -320,6 +441,7 @@ cooperativeResolveUpdate(Ip, Port) ->
 resolveUpdateReq(Servers, Name, GameStr) ->
     case Servers of
         [Server | Rest] ->
+            io:format("trying ~s ~p~n", [Name, Server]),
             Ip = Server#url.ip,
             Port = Server#url.port,
             {ok, Socket} = gen_tcp:connect(Ip, Port, [{active,false}, {packet,0}]),
@@ -379,7 +501,10 @@ userNames(UsernameList) ->
             {contains, Name, Pid} ->
                 io:format("here we are: ~p~n", [lists:member(Name, UsernameList)]),
                 Pid!lists:member(Name, UsernameList),
-                userNames(UsernameList)
+                userNames(UsernameList);
+            {remove, Name} ->
+                NewList =lists:filter(fun(X) -> X /= Name end, UsernameList),
+                userNames(NewList)
     end.
 
 cooperativeUserNameReq(Ip, Port) ->
@@ -435,6 +560,21 @@ checkIfNameExists(Name) ->
                 Val -> Val
             end
     end.
+
+removeName(Name) ->
+    UserNamesPid = global:whereis_name("name_list"),
+    UserNamesPid!{remove, Name},
+    removeNameReq(totalServerList(), Name).
+
+removeNameReq(Servers, Name) ->
+    lists:foreach(fun(X) ->
+        if
+            not( X#url.isLocal ) ->
+                {ok, Socket} = gen_tcp:connect(X#url.ip, X#url.port, [{active,false}, {packet,0}]),
+                gen_tcp:send(Socket, "COOP REMOVE NAME " ++ Name);
+            true -> skip
+        end
+    end, Servers).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -511,7 +651,7 @@ gameList(GameList) ->
         {update, UpdGame} ->
             {ok, NewGameList} = replaceUpdatedGame(GameList, UpdGame),
             gameList(NewGameList);
-        {update, UpdGame, Pid} ->
+        {update, UpdGame, Pid} -> %% used for coop
             case replaceUpdatedGame(GameList, UpdGame) of
                 {ok, NewGameList} ->
                     Pid!ok,
@@ -545,7 +685,16 @@ parseGameList(GameList, Accumulator) ->
 
 %% receive a list of games and a game, replaces it and returns a new list
 replaceUpdatedGame(GameList, UpdGame) ->
-    replaceUpdatedGame([], GameList, UpdGame).
+    if
+        UpdGame#gameState.victory == 1 ->
+            removeGame(GameList, UpdGame);
+
+        (UpdGame#gameState.player1 == "-") and  (UpdGame#gameState.player2 == "-")->
+            removeGame(GameList, UpdGame);
+
+        true->
+            replaceUpdatedGame([], GameList, UpdGame)
+    end.
 
 replaceUpdatedGame(Front, Back, UpdGame) ->
     io:format("replaceUpdatedGame~n"),
@@ -561,6 +710,11 @@ replaceUpdatedGame(Front, Back, UpdGame) ->
             end;
         [] -> {error, "game not found"}
     end.
+
+removeGame(GameList, UpdGame) ->
+    io:format("removing game ~n"),
+    L = lists:filter(fun(Game) -> Game#gameState.id =/= UpdGame#gameState.id end, GameList),
+    {ok, L}.
 %%%%%%%%%%%%
 
 %%%%%%%
@@ -579,7 +733,7 @@ cooperativeGameListReq(Ip, Port) ->
             Servers = serverList(Ip, Port),
             spawn(?MODULE, getGameReq, [Servers, GameId, Pid]);
         {update, Game} ->
-            io:format("updateGame~n"),
+            io:format("updateGame ~p~n", [Game]),
             Servers = serverList(Ip, Port),
             spawn(?MODULE, updateGameCoop, [Game, Servers])
     end,
@@ -704,10 +858,10 @@ changeGameStatus(GameId, Fun, Change) ->
         {ok, Game} ->
             case Fun(Game, Change) of
                 error -> error;
-                {error, Reason} ->
-                    io:format("error en changeGameStatus ~s~n", [Reason]),
-                    error;
-                UpdGame ->
+                {error, _Reason} ->
+                    io:format("error en changeGameStatus ~s~n", [_Reason]),
+                    {error, _Reason};
+                {ok, UpdGame} ->
                     io:format("receive updated game ~s~s~n",[UpdGame#gameState.id, UpdGame#gameState.player2]),
                     GameListPid!{update, UpdGame},
                     GameStr = gameStateToStr(UpdGame),
@@ -725,18 +879,23 @@ changeGameStatus(GameId, Fun, Change) ->
                             io:format("bad record received~n"),
                              error;
                         Game ->
-                            case Fun(Game, Change) of
+                            io:format("changeGameStatus ~p~n", [Game]),
+                            FunRes = Fun(Game, Change),
+                            io:format("game result ~p~n", [FunRes]),
+                            case FunRes of
                                 error -> error;
-                                UpdGame ->
-                                    io:format("update remotelly~n"),
+                                {error, _Reason} -> io:format("ERROR ~p~n", [_Reason]), {error, _Reason};
+                                {ok, UpdGame} ->
+                                    io:format("update remotelly ~p~n",[UpdGame]),
                                     CoopGameListPid!{update, UpdGame},
                                     UpdGameStr = gameStateToStr(UpdGame),
                                     {ok, UpdGame, UpdGameStr}
+
                             end
                     end;
                 {error, Reason} ->
                     io:format("Game ~s not found~n", [GameId]),
-                    error
+                    {error, Reason}
             end
     end.
 
@@ -745,16 +904,15 @@ tryUpdatePlayer(Game, Name) ->
     case Game#gameState.player2 of
         "-" ->
             io:format("case 1 bro~n"),
-            startGame(#gameState{
-                id = Game#gameState.id,
-                player1 = Game#gameState.player1,
-                player2 = Name,
-                watchers = Game#gameState.watchers
-            });
+            {ok, startGame(Game#gameState{ player2 = Name })};
         _ ->
-            io:format("Game has already occupied~n"),
-            error
-%%            end
+            case Game#gameState.player1 of
+                "-" ->
+                    {ok, startGame(Game#gameState{ player1 = Name })};
+                _ ->
+                    io:format("Game has already occupied~n"),
+                    {error, "Game has already occupied"}
+            end
     end.
 
 tryAddWatcher(Game, Name) ->
@@ -762,12 +920,7 @@ tryAddWatcher(Game, Name) ->
     case lists:member(Name, Game#gameState.watchers) of
         false ->
             io:format("Adding watcher!~n"),
-            #gameState{
-                id = Game#gameState.id,
-                player1 = Game#gameState.player1,
-                player2 = Game#gameState.player2,
-                watchers = Game#gameState.watchers ++ [Name]
-            };
+            {ok, Game#gameState{watchers = Game#gameState.watchers ++ [Name]}};
         _ ->
             io:format("~s has already added to watchers~n", [Name]),
             error
@@ -778,30 +931,17 @@ tryLeaveGame(Game, Name) ->
     io:format("tryLeaveGame ~s ~s ~p~n", [Game#gameState.id, Name, Game#gameState.watchers]),
     if
         Game#gameState.player1 == Name ->
-            #gameState{
-                id = Game#gameState.id,
-                player1 = "-",
-                player2 = Game#gameState.player2,
-                watchers = Game#gameState.watchers
-            };
+            {ok, Game#gameState{player1 = "-"}};
 
         Game#gameState.player2 == Name ->
-            #gameState{
-                id = Game#gameState.id,
-                player1 = Game#gameState.player1,
-                player2 = "-",
-                watchers = Game#gameState.watchers
+            Game#gameState{
+                player2 = "-"
             };
 
         true ->
             case lists:member(Name, Game#gameState.watchers) of
                 true ->
-                    #gameState{
-                        id = Game#gameState.id,
-                        player1 = Game#gameState.player1,
-                        player2 = Game#gameState.player2,
-                        watchers = lists:delete(Name, Game#gameState.watchers)
-                    };
+                    {ok, Game#gameState{watchers = lists:delete(Name, Game#gameState.watchers)}};
                 _ ->
                     io:format("Player ~s is not in this game ~s~n", [Name, Game#gameState.id]),
                     error
@@ -809,11 +949,7 @@ tryLeaveGame(Game, Name) ->
     end.
 
 startGame(Game) ->
-    #gameState{
-        id = Game#gameState.id,
-        player1 = Game#gameState.player1,
-        player2 = Game#gameState.player2,
-        watchers = Game#gameState.watchers,
+    Game#gameState{
         turn = 1,
         state = [0, 0, 0, 0, 0, 0, 0, 0, 0]
     }.
@@ -832,11 +968,24 @@ allowedPlay() ->
         [[1,1], [2,2]],
         [[2,2], [1,3]],
         [[2.2], [3,1]],
+        [[3,1], [3,2]],
         [[2,2], [3,3]],
         [[3,2], [3,3]]
     ].
 
-isAllowedPlay(Play) ->
+isAllowedPlay1(Play) ->
+    io:format("isAllowedPlay1 ~p~n", [Play]),
+    lists:foldl(
+        fun(X, ACC) ->
+            case ACC of
+                true -> (X > 0) and (X < 4);
+                _ -> false
+            end
+        end,
+        true,
+        lists:flatten(Play)
+    ).
+isAllowedPlay2(Play) ->
     Plays = allowedPlay(),
     lists:foldl(
         fun(X, Acc) ->
@@ -847,7 +996,8 @@ isAllowedPlay(Play) ->
             end
         end,
         false,
-        Plays).
+        Plays
+    ).
 
 tryToPlay(Game, Change) ->
     Name = element(1, Change),
@@ -882,23 +1032,27 @@ tryToPlay1(Play, Player, Game) ->
     ListValue = 3*(lists:nth(1, Play_) - 1) + lists:nth(2, Play_),
     State = Game#gameState.state,
     io:format("tryToPlay1 ~p ~p ~n", [ListValue, State]),
-    case lists:nth(ListValue, State) == 0 of
-        false -> {error, "PLACE IS OCCUPIED"};
-        _ ->
-            case count(Player, State) < 3 of
-                false -> {error, "UNACCEPTABLE PLAY"};
+    case isAllowedPlay1(Play) of
+        true ->
+            io:format("try to play ~p ~p~n", [ListValue, State]),
+            case lists:nth(ListValue, State) == 0 of
+                false -> {error, "PLACE IS OCCUPIED"};
                 _ ->
-                    NewState = lists:sublist(State, ListValue - 1) ++
-                            [Player] ++ lists:sublist(State, ListValue + 1, 9),
-                    NewGame = Game#gameState{
-                        state = NewState,
-                        turn = case Game#gameState.turn of 1 -> 2; _ -> 1 end
-                    },
-                    io:format("tryToPlay ~p~n", [NewGame]),
-                    Val = victoryCheck(NewGame#gameState.state),
-                    io:format("tryToPlay1 ~p~n", [Val]),
-                    NewGame
-            end
+                    case count(Player, State) < 3 of
+                        false -> {error, "UNACCEPTABLE PLAY"};
+                        _ ->
+                            NewState = lists:sublist(State, ListValue - 1) ++
+                                    [Player] ++ lists:sublist(State, ListValue + 1, 9),
+                            NewGame = Game#gameState{
+                                state = NewState,
+                                turn = case Game#gameState.turn of 1 -> 2; _ -> 1 end,
+                                victory = victoryCheck(NewState)
+                            },
+                            io:format("tryToPlay ~p~n", [NewGame]),
+                            {ok, NewGame}
+                    end
+            end;
+        _ -> {error, "UNACCEPTABLE PLAY"}
     end.
 
 
@@ -911,7 +1065,7 @@ tryToPlay2(Play, Player, Game) ->
     State = Game#gameState.state,
     case (lists:nth(ListFrom, State) == Player) and (lists:nth(ListTo, State) == 0) of
         false -> {error, "UNACCEPTABLE PLAY"};
-        _ -> case isAllowedPlay(Play) of
+        _ -> case isAllowedPlay2(Play) of
                  false -> {error, "UNACCEPTABLE PLAY"};
                  _ ->
                      case listSwap(State, ListFrom, ListTo) of
@@ -919,12 +1073,11 @@ tryToPlay2(Play, Player, Game) ->
                          NewState ->
                              NewGame = Game#gameState{
                                  state = NewState,
-                                 turn = case Game#gameState.turn of 1 -> 2; _ -> 1 end
+                                 turn = case Game#gameState.turn of 1 -> 2; _ -> 1 end,
+                                 victory = victoryCheck(NewState)
                              },
                              io:format("tryToPlay2 ~p~n", [NewGame]),
-                             Val = victoryCheck(NewGame#gameState.state),
-                             io:format("tryToPlay2 ~p~n", [Val]),
-                             NewGame
+                             {ok, NewGame}
                      end
              end
     end.
@@ -932,29 +1085,23 @@ tryToPlay2(Play, Player, Game) ->
 
 %% Functions to check victory
 victoryCheck(State) ->
-    case horizontalCheck(State) of
-        no -> case verticalCheck(State) of
-                  no -> case diagonalCheck(State) of
-                            no -> no;
-                            {yes, Val} -> {yes, Val}
-                        end;
-                  {yes, Val} -> {yes, Val}
-              end;
-        {yes, Val} -> {yes, Val}
+    case horizontalCheck(State) == 1 orelse verticalCheck(State) == 1 orelse diagonalCheck(State) == 1 of
+        true -> 1;
+        _ -> 0
     end.
 
 isLine(A, B, C) ->
     if
-        (A == B) and (B == C) and (A /= 0) -> {yes, A};
-        true -> no
+        (A == B) and (B == C) and (A /= 0) -> A;
+        true -> 0
     end.
 
 horizontalCheck([A , B, C | Rest]) ->
     case isLine(A, B, C) of
-        no -> horizontalCheck(Rest);
-        {yes, Val} ->  {yes, Val}
+        0 -> horizontalCheck(Rest);
+        Val -> Val
     end;
-horizontalCheck([]) -> no.
+horizontalCheck([]) -> 0.
 
 verticalCheck(State) ->
     List = [lists:nth(1, State),
@@ -976,7 +1123,7 @@ diagonalCheck(State) ->
         lists:nth(3, State),
         lists:nth(5, State),
         lists:nth(7, State)],
-    io:format("verticalCheck~p~n", [List]),
+    io:format("diagonalCheck~p~n", [List]),
     horizontalCheck(List).
 %%%%%
 
@@ -1070,11 +1217,11 @@ parsePlay(Play) ->
 
 parsePlay1(Play) ->
     Places = string:split(Play, ",", all),
-    P1 = lists:nth(1, Places),
-    P2 = lists:nth(2, Places),
-    io:format("parsePlay1 ~p~p~n", [P1, P2]),
     case length(Places) of
         2 ->
+            P1 = lists:nth(1, Places),
+            P2 = lists:nth(2, Places),
+            io:format("parsePlay1 ~p~p~n", [P1, P2]),
             X = toInteger(P1),
             Y = toInteger(P2),
             if
