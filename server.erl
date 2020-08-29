@@ -280,11 +280,12 @@ pcommand(Command, Socket) ->
                                         {ok, Game, GameStr} ->
                                             if
                                                 Game#gameState.victory == 1 ->
-                                                    gen_tcp:send(Socket, "GAME FINISHED " ++ GameStr);
+                                                    GameStrFinal = GameStr ++ " 1";
                                                 true ->
-                                                    gen_tcp:send(Socket, "OK PLAY " ++ GameStr)
+                                                    GameStrFinal = GameStr
                                             end,
-                                            updateInterested(Game, GameStr, Name);
+                                            gen_tcp:send(Socket, "OK PLAY " ++ GameStrFinal),
+                                            updateInterested(Game, GameStrFinal, Name);
                                         {error, Reason} -> gen_tcp:send(Socket, "ERROR PLAY " ++ Reason);
                                         error -> gen_tcp:send(Socket, "ERROR PLAY")
                                     end
@@ -934,9 +935,9 @@ tryLeaveGame(Game, Name) ->
             {ok, Game#gameState{player1 = "-"}};
 
         Game#gameState.player2 == Name ->
-            Game#gameState{
+            {ok, Game#gameState{
                 player2 = "-"
-            };
+            }};
 
         true ->
             case lists:member(Name, Game#gameState.watchers) of
@@ -944,7 +945,7 @@ tryLeaveGame(Game, Name) ->
                     {ok, Game#gameState{watchers = lists:delete(Name, Game#gameState.watchers)}};
                 _ ->
                     io:format("Player ~s is not in this game ~s~n", [Name, Game#gameState.id]),
-                    error
+                    {error, "Player ~s is not in this game"}
             end
     end.
 
@@ -957,9 +958,11 @@ startGame(Game) ->
 allowedPlay() ->
     [[[1, 1], [1,2]],
         [[1, 1], [2,1]],
+        [[1, 1], [2,2]],
         [[1,2], [1,3]],
         [[1,2], [2,2]],
         [[1,3], [2,3]],
+        [[1,3], [2,2]],
         [[2,1], [3,1]],
         [[2,1], [2,2]],
         [[2,2], [3,2]],
@@ -1097,6 +1100,7 @@ isLine(A, B, C) ->
     end.
 
 horizontalCheck([A , B, C | Rest]) ->
+    io:format("horizontal check ~p, ~p~n", [[A,B,C], Rest]),
     case isLine(A, B, C) of
         0 -> horizontalCheck(Rest);
         Val -> Val

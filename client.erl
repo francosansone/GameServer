@@ -4,6 +4,7 @@
 init(Host, Port) ->
     {ok, Socket} = gen_tcp:connect(Host, Port, [{active,false}, {packet,0}]),
     spawn(?MODULE, controller, [Socket, self()]),
+    io:format("Enter command: "),
     send_data(Socket).
 
 init() -> init('localhost', 8000).
@@ -20,8 +21,6 @@ prompt() ->
 
 send_data(Socket) ->
     Cmd = read_cmd(),
-    %Args = read_args(),
-    %Line = Cmd ++ (" " ++ Args),
     send(Socket, Cmd),
     receive
         {userName, NewName} ->
@@ -32,21 +31,6 @@ send_data(Socket) ->
         _ ->
             exit(1)
     end.
-
-
-%send_data(Socket, UserName) ->
-%    Cmd = read_cmd(),
-%    Args = read_args(),
-%    Line = Cmd ++ ( " " ++ (UserName ++ (" " ++ Args))),
-%    send(Socket, Line),
-%    receive
-%        ok ->
-%            io:format("ok~n"),
-%             send_data(Socket, UserName);
-%        _ ->
-%            io:format("no ok~n"),
-%            send_data(Socket, UserName)
-%    end.
 
 read_stdin() ->
     case io:get_line("") of
@@ -86,10 +70,15 @@ controller(Socket, Pid) ->
                 "UPD " ++ GameStr ->
                     print_game(GameStr),
                     Pid!ok;
-                "GAME FINISHED " ++ GameStr ->
-                    io:format("~nGame over!~n"),
+                "OK ACC " ++ GameStr ->
                     print_game(GameStr),
                     Pid!ok;
+                "OK OBS " ++ GameStr ->
+                    print_game(GameStr),
+                    Pid!ok;
+                "OK BYE" ->
+                    gen_tcp:close(Socket),
+                    exit(Pid, "closed");
                 Response ->
                     io:format("llego algo! ~s~n", [Response]),
                     Pid!ok
@@ -106,16 +95,20 @@ controller(Socket, Pid) ->
     end.
 
 print_game(GameStr) ->
-    %server0_1 fran fren <> 1 0,0,0,0,0,0,0,0,0
+    %server0_1 fran fren <> 1 0,0,0,0,0,0,0,0,0 1
+
     GameList = string:split(GameStr, " ", all),
     io:format("~n********************~n"),
-    io:format("Room name: ~s~n", [lists:nth(1, GameList)]),
+    io:format("Room: ~s~n", [lists:nth(1, GameList)]),
     Player1 = lists:nth(2, GameList),
     Player2 = lists:nth(3, GameList),
     io:format("Player 1: ~s~n", [Player1]),
     io:format("Player 2: ~s~n", [Player2]),
+    io:format("Watchers: ~s~n", [lists:nth(4, GameList)]),
     Turn = lists:nth(5, GameList),
     if
+        length(GameList) == 7 andalso Turn == "1"-> io:format("Winner: ~s~n", [Player2]);
+        length(GameList) == 7 -> io:format("Winner: ~s~n", [Player1]);
         Turn == "1" -> io:format("Turn: ~s~n", [Player1]);
         true -> io:format("Turn: ~s~n", [Player2])
     end,
