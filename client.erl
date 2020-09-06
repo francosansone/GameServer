@@ -4,6 +4,7 @@
 init(Host, Port) ->
     {ok, Socket} = gen_tcp:connect(Host, Port, [{active,false}, {packet,0}]),
     spawn(?MODULE, controller, [Socket, self()]),
+    spawn(?MODULE, read_cmd, [self()]),
     io:format("Enter command: "),
     send_data(Socket).
 
@@ -11,18 +12,13 @@ init() -> init('localhost', 8000).
 
 init(Port) -> init('localhost', Port).
 
-prompt() ->
-    receive
-        {upd, Upd} ->
-            io:format("Game update ~p~n", [Upd]),
-            prompt()
-    end.
-
-
 send_data(Socket) ->
-    Cmd = read_cmd(),
-    send(Socket, Cmd),
     receive
+        {newCommand, "a"} ->
+            send_data(Socket);
+        {newCommand, Cmd} ->
+            send(Socket, Cmd),
+            send_data(Socket);
         {userName, NewName} ->
             io:format("Update user name ~s~n", [NewName]),
             send_data(Socket);
@@ -44,9 +40,10 @@ read_stdin() ->
             {ok, Res}
     end.
 
-read_cmd() ->
+read_cmd(Pid) ->
     {ok, Cmd} = read_stdin(),
-    Cmd.
+    Pid!{newCommand, Cmd},
+    read_cmd(Pid).
 
 read_args() ->
     io:format("Enter arguments: "),

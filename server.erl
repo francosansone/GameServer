@@ -88,52 +88,69 @@ dispatcher(ListenSocket, Port) ->
 pbalance(ServerList) ->
     receive
         {newStatus, Index, Queue} ->
+            io:format("new msg with queue: ~s ~p ~n", [Queue, Queue]),
             Index_ = list_to_integer(Index) + 1,
             Front = lists:sublist(ServerList, Index_ - 1),
             Back = lists:nthtail(Index_, ServerList),
             Server = lists:nth(Index_, ServerList),
-            NewServer = Server#url{queue = Queue},
+            NewServer = Server#url{queue = list_to_integer(Queue)},
             NewServerList = Front ++ [NewServer] ++ Back,
             pbalance(NewServerList);
+
         {lessLoaded, Command, Socket} ->
             LocalQueue = erlang:statistics(total_active_tasks),
             LocalServer = #url{isLocal=true, queue=LocalQueue},
             Server = lists:foldl(fun(X, Acc) ->
-                io:format("in foldr ~p, ~p~n", [X, Acc]),
+                io:format("in foldr ~p, ~p ~p, ~p, ~p~n", [X, Acc, X#url.queue, Acc#url.queue, (X#url.queue < Acc#url.queue)]),
                 case not(X#url.isLocal) and (X#url.queue < Acc#url.queue) of
                     true -> X;
                     _ -> Acc
                 end
             end, LocalServer, ServerList),
             io:format("pbalance lessLoadad ~p ~p~n", [Server, Server#url.isLocal]),
-            spawn(?MODULE, pcommand, [Command, Socket]),
-            pbalance(ServerList)
+            if
+                Server#url.isLocal -> spawn(?MODULE, pcommand, [Command, Socket]);
+                true ->
+                    gen_tcp:send(Server#url.socket, "pcommand " ++ Command),
+                    spawn(?MODULE, answering, [Server#url.socket, Socket])
+            end,
+            pbalance(ServerList)            
     end.
 
+answering(ServerSocket, ClientSocket) ->
+    case gen_tcp:recv(ServerSocket, 0) of
+        {ok, Response} ->
+            io:format("answering, ok response~n"),
+            gen_tcp:send(ClientSocket, Response);
+        {error, Reason} ->
+            io:format("answering, error response~n"),
+            gen_tcp:send(ClientSocket, Reason)
+    end,
+    io:format("answering terminó~n").
 
 
 psocket(Socket) ->
-    io:format("psocket, ~p~n", [Socket]),
     case gen_tcp:recv(Socket, 0) of
         {ok, Command} ->
             case Command of
-                    "Queue " ++ _Rest ->
-                        spawn(?MODULE, pcommand, [Command, Socket]),
-                        psocket(Socket);
-                    "pcommand" ++ _Rest ->
-                        spawn(?MODULE, pcommand, [Command, Socket]),
-                        psocket(Socket);
-                    "COOP " ++ _Rest ->
-                        spawn(?MODULE, pcommand, [Command, Socket]),
-                        psocket(Socket);
-                    "LOAD SERVER" ->
-                        spawn(?MODULE, pcommand, [Command, Socket]),
-                        psocket(Socket);
-                    _ ->
-                        PBalancePid = global:whereis_name("p_balance"),
-                        PBalancePid!{lessLoaded, Command, Socket},
-                        psocket(Socket)
-                end;
+                "Queue " ++ _Rest ->
+                    spawn(?MODULE, pcommand, [Command, Socket]),
+                    psocket(Socket);
+                "pcommand " ++ _Rest ->
+                    spawn(?MODULE, pcommand, [_Rest, Socket]),
+                    psocket(Socket);
+                "COOP " ++ _Rest ->
+                    spawn(?MODULE, pcommand, [Command, Socket]),
+                    psocket(Socket);
+                "LOAD SERVER" ->
+                    spawn(?MODULE, pcommand, [Command, Socket]),
+                    psocket(Socket);
+                _ ->
+                    PBalancePid = global:whereis_name("p_balance"),
+                    PBalancePid!{lessLoaded, Command, Socket},
+                    io:format("recalling~n"),
+                    psocket(Socket)
+            end;
         {error, Reason} ->
             io:format("closed ~p~n",[Reason]),
             gen_tcp:close(Socket)
@@ -338,8 +355,12 @@ pcommand(Command, Socket) ->
             end;
         "Queue " ++ Rest ->
             Values = string:split(Rest, " ", all),
-            PBalance = global:whereis_name("p_balance"),
-            PBalance!{newStatus, lists:nth(1, Values), lists:nth(2, Values)};
+            if
+                length(Values) == 3 ->
+                    PBalance = global:whereis_name("p_balance"),
+                    PBalance!{newStatus, lists:nth(1, Values), lists:nth(2, Values)};
+                true -> void %this prevents error when a server start after other
+            end;
         "LOAD SERVER" ->
             spawn(?MODULE, loadserver, [500]),
             gen_tcp:send(Socket, "OK");
@@ -381,10 +402,11 @@ loadserver(N) ->
 userSender(Socket) ->
     receive
         {upd, Command} ->
-            io:format("here send command ~s~n", [Command]),
-            gen_tcp:send(Socket, "UPD " ++ Command),
+            io:format("USER SENDER CALLING here send command ~s~n", [Command]),
+            A = gen_tcp:send(Socket, "UPD " ++ Command),
+            io:format("USER SENDER CALLED here send command ~s ~p~n", [Command, A]),
             userSender(Socket)
-end.
+    end.
 
 updateInterested(Game, GameStr, Name) ->
     io:format("Here, I have to update ~s ~s and ~p~n",
