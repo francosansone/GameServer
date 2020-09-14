@@ -1,7 +1,6 @@
 -module(server).
 -compile(export_all).
 
-
 -record(gameState, {
     id="",
     player1="-",
@@ -125,7 +124,7 @@ pcommand(Command, UserPid) ->
     io:format("pcommand ~s~n", [Command]),
     case Command of
         "CON " ++ Name ->
-            io:format("Recibe nombre ~s~n", [Name]),
+            io:format("Receive name ~s~n", [Name]),
             case checkIfNameExists(Name) of
                 false ->
                     addName(Name),
@@ -347,7 +346,6 @@ userNames(UsernameList) ->
     end.
 
 checkIfNameExists(Name) ->
-    io:format("checkIfNameExists~n"),
     lists:foldl(
         fun(X, Acc) ->
             if
@@ -366,7 +364,7 @@ addName(Name) ->
     NameList = whereis(name_list),
     NameList!{add, Name}.
 
-removeName(Name) -> io:format("removeName ~s~n", [Name]), lists:foreach(fun(X) -> {name_list, X}!{remove, Name} end, node_names()).
+removeName(Name) -> lists:foreach(fun(X) -> {name_list, X}!{remove, Name} end, node_names()).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -496,9 +494,7 @@ addWatcher(Name, GameId) ->
     changeGameStatus(GameId, Fun, Name).
 
 leaveGame(Name, GameId) ->
-    io:format("leaveGame ~s ~p", [Name, GameId]),
     Fun = fun(X, Y) -> tryLeaveGame(X, Y) end,
-    io:format("calling changeGameStatus~n"),
     changeGameStatus(GameId, Fun, Name).
 
 makeAMove(Change, GameId) ->
@@ -507,12 +503,10 @@ makeAMove(Change, GameId) ->
 
 %% bye command
 leaveGames(Name) ->
-    io:format("leave Games ~s~n", [Name]),
     lists:foreach(fun(Node) ->
         {game_list, Node}!{get, self()},
         receive
             Games ->
-                io:format("leaveGames ~p~n", [Games]),
                 lists:foreach(fun(X) ->
                     case leaveGame(Name, X#gameState.id) of
                         {ok, Game, GameStr} -> updateInterested(Game, GameStr, Name);
@@ -535,7 +529,6 @@ changeGameStatus(GameId, Fun, Change) ->
             GameFound -> GameFound
         end
     end, undefined, node_names()),
-    io:format("changeGameStatus ~p~n", [FindGame]),
     case FindGame of
         undefined -> {error, "Game not found"};
         {ok, Game} ->
@@ -543,7 +536,6 @@ changeGameStatus(GameId, Fun, Change) ->
                 error -> error;
                 {error, _Reason} -> io:format("ERROR ~p~n", [_Reason]), {error, _Reason};
                 {ok, UpdGame} ->
-                    io:format("update remotelly ~p~n",[UpdGame]),
                     {game_list, UpdGame#gameState.node}!{update, UpdGame},
                     {ok, UpdGame, gameStateToStr(UpdGame)}
 
@@ -554,7 +546,6 @@ tryUpdatePlayer(Game, Name) ->
     io:format("tryUpdatePlayer2 ~s ~s~n", [Game#gameState.id, Name]),
     case Game#gameState.player2 of
         "-" ->
-            io:format("case 1 bro~n"),
             {ok, Game#gameState{ player2 = Name }};
         _ ->
             case Game#gameState.player1 of
@@ -621,7 +612,6 @@ allowedPlay() ->
     ].
 
 isAllowedPlay1(Play) ->
-    io:format("isAllowedPlay1 ~p~n", [Play]),
     lists:foldl(
         fun(X, ACC) ->
             case ACC of
@@ -675,13 +665,10 @@ checkTurn(Play, Player, Game) ->
 
 tryToPlay1(Play, Player, Game) ->
     Play_ = lists:nth(1, Play),
-    io:format("tryToPlay1 ~p ~p~n", [Play, Play_]),
     ListValue = 3*(lists:nth(1, Play_) - 1) + lists:nth(2, Play_),
     State = Game#gameState.state,
-    io:format("tryToPlay1 ~p ~p ~n", [ListValue, State]),
     case isAllowedPlay1(Play) of
         true ->
-            io:format("try to play ~p ~p~n", [ListValue, State]),
             case lists:nth(ListValue, State) == 0 of
                 false -> {error, "PLACE IS OCCUPIED"};
                 _ ->
@@ -695,7 +682,6 @@ tryToPlay1(Play, Player, Game) ->
                                 turn = case Game#gameState.turn of 1 -> 2; _ -> 1 end,
                                 victory = victoryCheck(NewState)
                             },
-                            io:format("tryToPlay ~p~n", [NewGame]),
                             {ok, NewGame}
                     end
             end;
@@ -723,7 +709,6 @@ tryToPlay2(Play, Player, Game) ->
                                  turn = case Game#gameState.turn of 1 -> 2; _ -> 1 end,
                                  victory = victoryCheck(NewState)
                              },
-                             io:format("tryToPlay2 ~p~n", [NewGame]),
                              {ok, NewGame}
                      end
              end
@@ -744,7 +729,6 @@ isLine(A, B, C) ->
     end.
 
 horizontalCheck([A , B, C | Rest]) ->
-    io:format("horizontal check ~p, ~p~n", [[A,B,C], Rest]),
     case isLine(A, B, C) of
         0 -> horizontalCheck(Rest);
         Val -> Val
@@ -761,7 +745,6 @@ verticalCheck(State) ->
         lists:nth(3, State),
         lists:nth(6, State),
         lists:nth(9, State)],
-    io:format("verticalCheck~p~n", [List]),
     horizontalCheck(List).
 
 diagonalCheck(State) ->
@@ -771,19 +754,16 @@ diagonalCheck(State) ->
         lists:nth(3, State),
         lists:nth(5, State),
         lists:nth(7, State)],
-    io:format("diagonalCheck~p~n", [List]),
     horizontalCheck(List).
 %%%%%
 
 searchGame(GameId, GameList) ->
-    io:format("searchGame ~p ~p~n", [GameId, GameList]),
     case searchingGame(GameId, GameList) of
         undefined -> {error, "Game does not exist"};
         Game -> {ok, Game}
     end.
 
 searchingGame(GameId, GameList) ->
-    io:format("searchingGame ~p ~p~n", [GameId, GameList]),
     lists:foldl(fun(Game, Acc) ->
         case Acc of
             undefined ->
@@ -797,7 +777,6 @@ searchingGame(GameId, GameList) ->
 
 
 gameStateToStr(Game) ->
-    io:format("gameStateToStr ~p~n", [Game]),
     Id = Game#gameState.id,
     P1 = " " ++ Game#gameState.player1,
     case Game#gameState.player2 of
@@ -813,7 +792,6 @@ gameStateToStr(Game) ->
     State = " " ++ lists:foldl(fun(X, Acc) ->  Acc ++ lists:flatten(io_lib:format("~p", [X])) ++ "," end,
         "", Game#gameState.state),
     GameStr = Id ++ P1 ++ P2 ++ Watchers ++ Turn ++ State,
-    io:format("gameStateToStr ~s ~s ~s~n", [Id, P2, GameStr]),
     GameStr.
 
 parseStrWatchersToList(StrWatchers) ->
@@ -822,7 +800,6 @@ parseStrWatchersToList(StrWatchers) ->
             WStrTemp = tl(StrWatchers),
             WStrTemp_ = string:substr(WStrTemp, 1, length(WStrTemp) - 1),
             Watchers = string:split(WStrTemp_, ","),
-            io:format("result: ~p~n", [Watchers]),
             Watchers;
         true -> []
     end.
@@ -842,7 +819,6 @@ parsePlay1(Play) ->
         2 ->
             P1 = lists:nth(1, Places),
             P2 = lists:nth(2, Places),
-            io:format("parsePlay1 ~p~p~n", [P1, P2]),
             X = toInteger(P1),
             Y = toInteger(P2),
             if
@@ -855,7 +831,6 @@ parsePlay1(Play) ->
 parsePlay2(Play) ->
     From = lists:nth(1, Play),
     To = lists:nth(2, Play),
-    io:format("parsePlay2 ~s ~s ~s~n", [Play, From, To]),
     case parsePlay1(From) of
         error ->
             io:format("error caso 1~n"),

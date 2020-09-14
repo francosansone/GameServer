@@ -14,13 +14,15 @@ init(Port) -> init('localhost', Port).
 
 send_data(Socket) ->
     receive
-        {newCommand, "a"} ->
+        {newCommand, ""} ->
+            io:format("Enter command:"),
             send_data(Socket);
         {newCommand, Cmd} ->
             send(Socket, Cmd),
             send_data(Socket);
         {userName, NewName} ->
-            io:format("Update user name ~s~n", [NewName]),
+            io:format("User name updated ~s~n", [NewName]),
+            io:format("Enter command:"),
             send_data(Socket);
         ok ->
              send_data(Socket);
@@ -36,7 +38,6 @@ read_stdin() ->
             {ok, ""};
         Line->
             Res = string:sub_string(Line, 1, string:len(Line) - 1),
-            % aca una funcion filter, para filtrar comandos
             {ok, Res}
     end.
 
@@ -44,11 +45,6 @@ read_cmd(Pid) ->
     {ok, Cmd} = read_stdin(),
     Pid!{newCommand, Cmd},
     read_cmd(Pid).
-
-read_args() ->
-    io:format("Enter arguments: "),
-    {ok, Args} = read_stdin(),
-    Args.
 
 send(Socket, Data) ->
     io:format("sending ~s~n", [Data]),
@@ -77,7 +73,7 @@ controller(Socket, Pid) ->
                     gen_tcp:close(Socket),
                     exit(Pid, "closed");
                 Response ->
-                    io:format("llego algo! ~s~n", [Response]),
+                    io:format("~s~n", [Response]),
                     Pid!ok
             end,
             io:format("Enter command: "),
@@ -87,12 +83,12 @@ controller(Socket, Pid) ->
             gen_tcp:close(Socket),
             exit(Pid, "closed");
         _ ->
-            io:format("otra cosa~n"),
+            io:format("unexpected~n"),
             exit(Pid, "closed")
     end.
 
 print_game(GameStr) ->
-    %server0_1 fran fren <> 1 0,0,0,0,0,0,0,0,0 1
+    %server0_1 player1 player2 <watcher1, watcher2> 1 0,0,0,0,0,0,0,0,0 1
 
     GameList = string:split(GameStr, " ", all),
     io:format("~n********************~n"),
